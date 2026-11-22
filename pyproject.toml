@@ -1,0 +1,12 @@
+[project]
+name = "qna-agent"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "faiss-cpu>=1.16.0",
+    "numpy>=2.5.5",
+    "pypdf>=7.1.1",
+    "sentence-transformers>=6.3.0",
+    "streamlit>=1.67.0",
+]
