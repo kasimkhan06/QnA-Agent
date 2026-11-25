@@ -45,7 +45,7 @@ def chunk_pages(pages : list[dict] , source_name:str , chunk_size : int = 50 , o
 
     chunks = []
     for page_item in pages:
-        chunks.extend(chunk_single_page(page_item, chunk_size , overlap))
+        chunks.extend(chunk_single_page(page_item, chunk_size , overlap, source_name))
 
     return chunks
 
@@ -57,4 +57,4 @@ if __name__ == "__main__":
     print(pages[50]['text'])
     print('------------------CHUNKS-----------------')
     chunks = chunk_pages(pages, source_name='Sealed Nectar')
-    print(chunks)
+    print(len(chunks))
