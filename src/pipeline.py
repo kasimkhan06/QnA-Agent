@@ -1,81 +1,84 @@
-import faiss
-from sentence_transformers import SentenceTransformer
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langchain_core.runnables import Runnable, RunnableLambda, RunnablePassthrough
+from langchain_huggingface import HuggingFaceEmbeddings
 
-from src.chunker import chunk_pages, extract_pdf_pages
+from src.chunker import chunk_document
 from src.retriever import (
-    find_similarity,
-    generate_embeddings,
-    initialize_models,
-    prepare_data,
-    process_query,
-    store_embeddings,
+    build_vectorstore,
+    get_retriever,
+    initialize_embeddings,
+    search_with_scores,
 )
 
 
 def ingest_pdf(
-    file_obj,
-    source_name: str,
-    embedding_model: SentenceTransformer,
+    document_path: str,
+    embeddings: HuggingFaceEmbeddings,
     chunk_size: int = 800,
-    overlap: int = 120,
-) -> tuple[list[dict], faiss.IndexFlatIP]:
-    """Run full ingestion: PDF -> pages -> chunks -> embeddings -> FAISS index."""
-    pages = extract_pdf_pages(file_obj)
-    chunks = chunk_pages(
-        pages,
-        source_name=source_name,
+    chunk_overlap: int = 120,
+) -> tuple[list[Document], FAISS]:
+    """Load a PDF, recursively split it into Documents, and build a FAISS vector store."""
+    chunks = chunk_document(
+        document_path=document_path,
         chunk_size=chunk_size,
-        overlap=overlap,
+        chunk_overlap=chunk_overlap,
     )
 
     if not chunks:
-        raise ValueError(f"No extractable text found in {source_name}.")
+        raise ValueError(f"No extractable text found in {document_path}.")
 
-    text_chunks = prepare_data(chunks)
-    document_embeddings = generate_embeddings(text_chunks, embedding_model)
-    index = store_embeddings(document_embeddings)
-
-    return chunks, index
+    vectorstore = build_vectorstore(chunks=chunks, embeddings=embeddings)
+    return chunks, vectorstore
 
 
-def query_documents(
-    question: str,
-    chunks: list[dict],
-    index: faiss.IndexFlatIP,
-    embedding_model: SentenceTransformer,
-    top_k: int = 5,
-) -> list[dict]:
-    """Encode a user question and retrieve the top-k matching chunks."""
-    query_embedding = process_query(question, embedding_model)
-    return find_similarity(
-        query_embedding=query_embedding,
-        index=index,
-        chunks=chunks,
-        top_k=top_k,
+def format_docs(docs: list[Document]) -> str:
+    """Format retrieved Document chunks into a single readable context block."""
+    return "\n\n---\n\n".join(doc.page_content for doc in docs)
+
+
+def build_retrieval_chain(vectorstore: FAISS, top_k: int = 5) -> Runnable:
+    """Build an LCEL retrieval chain returning question, raw docs, and formatted context."""
+    retriever = get_retriever(vectorstore=vectorstore, top_k=top_k)
+
+    retrieval_chain = {
+        "docs": retriever,
+        "question": RunnablePassthrough(),
+    } | RunnableLambda(
+        lambda x: {
+            "question": x["question"],
+            "docs": x["docs"],
+            "context": format_docs(x["docs"]),
+        }
     )
+    return retrieval_chain
 
 
 if __name__ == "__main__":
-    pdf_path = "data/English_ArRaheeq_AlMakhtum_THE_SEALED_NECTAR.pdf"
+    document_path = "data/English_ArRaheeq_AlMakhtum_THE_SEALED_NECTAR.pdf"
 
-    # 1. Load model once
-    model = initialize_models()
+    # 1. Initialize embeddings once
+    embeddings = initialize_embeddings()
 
-    # 2. Ingest PDF into FAISS
-    chunks, index = ingest_pdf(
-        file_obj=pdf_path,
-        source_name="Sealed Nectar",
-        embedding_model=model,
-        chunk_size=1000,
-        overlap=150,
+    # 2. Ingest PDF into LangChain FAISS vector store
+    chunks, vectorstore = ingest_pdf(
+        document_path=document_path,
+        embeddings=embeddings,
+        chunk_size=800,
+        chunk_overlap=120,
     )
-    print(f"Indexed {index.ntotal} chunks.")
+    print(f"Indexed {len(chunks)} chunks into FAISS.")
 
-    # 3. Query the pipeline
+    # 3. Invoke the LCEL retrieval chain
     question = "What happened during the Treaty of Hudaybiyyah?"
-    results = query_documents(question, chunks, index, model, top_k=5)
+    chain = build_retrieval_chain(vectorstore=vectorstore, top_k=5)
+    response = chain.invoke(question)
 
-    print(f"\nQuery: {question}\n")
-    for rank, res in enumerate(results, start=1):
-        print(f"#{rank} | Score: {res['score']:.4f} | Source: {res['source']} | Page: {res['page_no']}")
-        print(res["text"][:250] + "...\n")
+    print(f"\nQuery: {response['question']}\n")
+    for rank, doc in enumerate(response["docs"], start=1):
+        print(f"#{rank} | Metadata: {doc.metadata}")
+        print(doc.page_content[:250] + "...\n")
+
+    # Optional: Inspect cosine similarity scores
+    scored_results = search_with_scores(question, vectorstore=vectorstore, top_k=5)
+    print("Top cosine scores:", [round(float(score), 4) for _, score in scored_results])

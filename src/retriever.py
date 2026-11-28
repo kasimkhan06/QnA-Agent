@@ -1,70 +1,58 @@
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
+import torch
+from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores.utils import DistanceStrategy
+from langchain_core.documents import Document
+from langchain_core.vectorstores import VectorStoreRetriever
+from langchain_huggingface import HuggingFaceEmbeddings
 
 
-def initialize_models(embedding_model: str = "Qwen/Qwen3-Embedding-0.6B") -> SentenceTransformer:
-    """Initializes and returns the bi-encoder model."""
-    return SentenceTransformer(embedding_model)
+def initialize_embeddings(
+    model_name: str = "Qwen/Qwen3-Embedding-0.6B",
+) -> HuggingFaceEmbeddings:
+    """Initialize the bi-encoder with asymmetric query prompt and L2 normalization."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    return HuggingFaceEmbeddings(
+        model_name=model_name,
+        model_kwargs={"device": device},
+        encode_kwargs={
+            "batch_size": 16,
+            "normalize_embeddings": True,
+        },
+        query_encode_kwargs={
+            "prompt_name": "query",
+            "normalize_embeddings": True,
+        },
+    )
 
 
-def prepare_data(chunks: list[dict]) -> list[str]:
-    """Convert textual chunks with metadata into a list of strings."""
-    return [chunk["text"] for chunk in chunks]
+def build_vectorstore(
+    chunks: list[Document],
+    embeddings: HuggingFaceEmbeddings,
+) -> FAISS:
+    """Embed Document chunks and store them in a LangChain FAISS vector store."""
+    return FAISS.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        distance_strategy=DistanceStrategy.MAX_INNER_PRODUCT,
+    )
 
 
-def generate_embeddings(text: list[str], embedding_model: SentenceTransformer) -> np.ndarray:
-    """Generates L2-normalized float32 embeddings for document chunks."""
-    return embedding_model.encode_document(
-        text,
-        batch_size=16,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-        show_progress_bar=True,
-    ).astype("float32")
+def get_retriever(
+    vectorstore: FAISS,
+    top_k: int = 5,
+) -> VectorStoreRetriever:
+    """Return a LangChain Runnable retriever over the FAISS vector store."""
+    return vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": top_k},
+    )
 
 
-def store_embeddings(document_embeddings: np.ndarray) -> faiss.IndexFlatIP:
-    """Stores document embeddings in a FAISS exact inner-product index."""
-    dim = document_embeddings.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(document_embeddings)
-    return index
-
-
-def process_query(query: str, embedding_model: SentenceTransformer) -> np.ndarray:
-    """Encodes a user query into a 2D normalized float32 embedding."""
-    return embedding_model.encode_query(
-        [query],
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-    ).astype("float32")
-
-
-def find_similarity(
-        query_embedding: np.ndarray,
-        index: faiss.IndexFlatIP,
-        chunks: list[dict],
-        top_k: int = 5,
-    ) -> list[dict]:
-    """Finds top-k most similar chunks for a query embedding."""
-    if not chunks:
-        return []
-
-    k = min(top_k, len(chunks))
-    scores, indices = index.search(query_embedding, k)
-
-    matched_chunks = []
-    for score, idx in zip(scores[0], indices[0]):
-        if idx == -1:
-            continue
-        matched_chunks.append(
-            {
-                "idx": int(idx),
-                "score": float(score),
-                "source": chunks[idx].get("source_name", ""),
-                "page_no": chunks[idx]["page_no"],
-                "text": chunks[idx]["text"],
-            }
-        )
-    return matched_chunks
+def search_with_scores(
+    question: str,
+    vectorstore: FAISS,
+    top_k: int = 5,
+) -> list[tuple[Document, float]]:
+    """Retrieve top-k Documents along with their cosine similarity scores."""
+    return vectorstore.similarity_search_with_score(question, k=top_k)
